@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+
+# User-provided source photos and generated card output
+origin_cards/*
+!origin_cards/mapping.txt
+cards/
+examples/demo_output*.png
+
+# OS cruft
+.DS_Store
