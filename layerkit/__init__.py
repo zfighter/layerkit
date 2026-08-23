@@ -16,6 +16,7 @@ from .card import (
     generate_cards_batch,
     generate_cards_from_dir,
     parse_mapping_file,
+    remove_watermark,
 )
 from .document import Document
 from .layer import VALID_BLEND_MODES, Layer
@@ -31,6 +32,7 @@ __all__ = [
     "generate_cards_from_dir",
     "parse_mapping_file",
     "extract_dark_bg_color",
+    "remove_watermark",
 ]
 
 __version__ = "0.1.0"

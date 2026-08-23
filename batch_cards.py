@@ -25,9 +25,20 @@ def main() -> None:
     parser.add_argument("--mapping", default=None, help="Mapping txt path (default: <dir>/mapping.txt)")
     parser.add_argument("--out", default="cards", help="Output directory for generated cards (default: cards)")
     parser.add_argument("--scale", type=int, default=3, help="Render scale multiplier (default: 3)")
+    parser.add_argument(
+        "--no-remove-watermark",
+        action="store_true",
+        help="Skip corner-watermark inpainting (it's applied by default)",
+    )
     args = parser.parse_args()
 
-    results = generate_cards_from_dir(args.dir, args.mapping, out_dir=args.out, scale=args.scale)
+    results = generate_cards_from_dir(
+        args.dir,
+        args.mapping,
+        out_dir=args.out,
+        scale=args.scale,
+        remove_watermark_flag=not args.no_remove_watermark,
+    )
     print(f"Generated {len(results)} card(s) into {args.out}/")
     for path, bg in results:
         print(f"  {path}  background={bg}")

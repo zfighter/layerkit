@@ -7,3 +7,9 @@
 # - 生成的卡片会输出到 cards/ 目录，文件名与原图同名（.png）
 
 height.png | 身高 | Height
+concertina.png｜ 六角手风琴 ｜concertina
+button.png｜ 按钮 ｜button
+note.png｜ 音符 ｜note
+bellows.png｜ 风箱 ｜bellows
+vibrate.png｜ 振动；颤动 ｜vibrate
+melody.png｜ 旋律 ｜melody

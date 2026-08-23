@@ -12,6 +12,7 @@ from layerkit.card import (
     generate_card,
     generate_cards_from_dir,
     parse_mapping_file,
+    remove_watermark,
 )
 
 
@@ -91,11 +92,60 @@ def test_parse_mapping_file_reads_rows_and_skips_comments(tmp_path):
     ]
 
 
+def test_parse_mapping_file_accepts_fullwidth_pipe(tmp_path):
+    # Chinese IMEs often auto-substitute "|" with the fullwidth "｜" (U+FF5C).
+    mapping_path = tmp_path / "mapping.txt"
+    mapping_path.write_text("photo.jpg｜ 音乐家 ｜Musicians\n", encoding="utf-8")
+    rows = parse_mapping_file(str(mapping_path))
+    assert rows == [{"image": "photo.jpg", "cn": "音乐家", "en": "Musicians"}]
+
+
 def test_parse_mapping_file_rejects_malformed_line(tmp_path):
     mapping_path = tmp_path / "mapping.txt"
     mapping_path.write_text("just_a_filename_no_pipe\n", encoding="utf-8")
     with pytest.raises(ValueError):
         parse_mapping_file(str(mapping_path))
+
+
+def test_remove_watermark_erases_corner_patch():
+    # Plain background with a contrasting "watermark" stamped in the corner
+    # region remove_watermark targets by default.
+    img = Image.new("RGB", (400, 300), (240, 235, 210))
+    x0, y0 = int(400 * 0.75), int(300 * 0.92)
+    for x in range(x0, 400):
+        for y in range(y0, 300):
+            img.putpixel((x, y), (0, 0, 0))
+
+    cleaned = remove_watermark(img)
+    # center of the patched region should now be close to the surrounding
+    # background color rather than the stamped black.
+    r, g, b = cleaned.getpixel(((x0 + 400) // 2, (y0 + 300) // 2))
+    assert (r, g, b) != (0, 0, 0)
+    assert abs(r - 240) < 40 and abs(g - 235) < 40 and abs(b - 210) < 40
+
+
+def test_remove_watermark_preserves_alpha_channel():
+    img = Image.new("RGBA", (200, 200), (100, 150, 200, 128))
+    cleaned = remove_watermark(img)
+    assert cleaned.mode == "RGBA"
+    assert cleaned.getpixel((5, 5))[3] == 128
+
+
+def test_generate_card_skips_watermark_removal_when_disabled(tmp_path, monkeypatch):
+    import layerkit.card as card_module
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("remove_watermark should not have been called")
+
+    monkeypatch.setattr(card_module, "remove_watermark", _boom)
+
+    photo_path = tmp_path / "photo.jpg"
+    _solid_photo().save(photo_path)
+    out_path = tmp_path / "card.png"
+
+    # Should not raise, proving remove_watermark was skipped.
+    generate_card(str(photo_path), out_path=str(out_path), scale=1, remove_watermark_flag=False)
+    assert out_path.exists()
 
 
 def test_generate_cards_from_dir_processes_mapping_and_skips_missing(tmp_path):

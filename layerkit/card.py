@@ -24,6 +24,8 @@ import os
 from pathlib import Path
 from typing import Iterable, List, Mapping, Optional, Tuple
 
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from .document import Document
@@ -53,6 +55,51 @@ FONT_CN_INDEX = 5  # PingFang SC Medium
 # English title so it reads as a playful headline rather than plain body text.
 FONT_EN_PATH = "/System/Library/Fonts/Noteworthy.ttc"
 FONT_EN_INDEX = 1  # Noteworthy Bold
+
+# (left, top, right, bottom) as fractions of image width/height -- covers the
+# bottom-right corner where AI generators commonly stamp a watermark (e.g.
+# Doubao's "豆包AI生成"). Validated against several 豆包-generated sources.
+WATERMARK_REGION = (0.75, 0.92, 1.0, 1.0)
+WATERMARK_INPAINT_RADIUS = 5
+
+
+def remove_watermark(
+    image: Image.Image,
+    region: Tuple[float, float, float, float] = WATERMARK_REGION,
+    inpaint_radius: int = WATERMARK_INPAINT_RADIUS,
+) -> Image.Image:
+    """Erase a corner watermark by inpainting it from the surrounding pixels.
+
+    ``region`` is a ``(left, top, right, bottom)`` box given as *fractions*
+    of the image's width/height; the default targets the bottom-right corner
+    where AI image generators commonly stamp a watermark (e.g. Doubao's
+    "豆包AI生成"). Uses OpenCV's fast-marching inpaint (Telea's algorithm),
+    which reconstructs the region from its boundary inward.
+
+    This works best when run against the original, full-resolution source
+    photo (before any cover-crop/resize) -- more real pixels around the
+    watermark means a better reconstruction. On a plain or gently textured
+    background it blends in almost perfectly; on a background with fine
+    detail running right up into the corner (e.g. grass blades, patterned
+    fabric), the patch will come out visibly softer than its surroundings --
+    inpainting can't invent detail that was never captured.
+    """
+    rgb = np.array(image.convert("RGB"))
+    h, w = rgb.shape[:2]
+    left, top, right, bottom = region
+    x0, y0 = int(w * left), int(h * top)
+    x1, y1 = int(w * right), int(h * bottom)
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    mask[y0:y1, x0:x1] = 255
+
+    inpainted = cv2.inpaint(rgb, mask, inpaint_radius, cv2.INPAINT_TELEA)
+    result = Image.fromarray(inpainted)
+
+    if image.mode == "RGBA":
+        result = result.convert("RGBA")
+        result.putalpha(image.getchannel("A"))
+    return result
 
 
 def extract_dark_bg_color(
@@ -143,6 +190,8 @@ def generate_card(
     out_path: str = "card.png",
     scale: int = 3,
     bg_color: Optional[Tuple[int, int, int]] = None,
+    remove_watermark_flag: bool = True,
+    watermark_region: Tuple[float, float, float, float] = WATERMARK_REGION,
 ) -> Tuple[str, Tuple[int, int, int]]:
     """Compose the 3-layer card (background / image / text) and export it.
 
@@ -156,12 +205,21 @@ def generate_card(
             ``scale=3`` exports at 1179x2556, a typical @3x resolution.
         bg_color: force a specific RGB background color instead of
             auto-detecting one from the photo.
+        remove_watermark_flag: if True (the default), inpaint over a corner
+            watermark (see :func:`remove_watermark`) before doing anything
+            else with the photo -- so the background-color extraction, crop,
+            and rounding all operate on the cleaned-up image.
+        watermark_region: forwarded to :func:`remove_watermark`; override if
+            a particular source's watermark sits somewhere else.
 
     Returns:
         ``(out_path, bg_color_used)``.
     """
     src = Image.open(image_path)
     src.load()
+
+    if remove_watermark_flag:
+        src = remove_watermark(src, region=watermark_region)
 
     resolved_bg = bg_color or extract_dark_bg_color(src)
     canvas_size = (CARD_WIDTH * scale, CARD_HEIGHT * scale)
@@ -218,6 +276,7 @@ def generate_cards_batch(
     items: Iterable[Mapping[str, object]],
     out_dir: str = "cards",
     scale: int = 3,
+    remove_watermark_flag: bool = True,
 ) -> List[Tuple[str, Tuple[int, int, int]]]:
     """Run :func:`generate_card` over a batch of images, one call each.
 
@@ -230,8 +289,13 @@ def generate_cards_batch(
               source image's own filename stem (e.g. ``photo1.jpg`` -> ``photo1.png``).
             - ``bg_color`` (optional): force a specific ``(r, g, b)`` background
               instead of auto-detecting one for that image.
+            - ``remove_watermark`` (optional): per-item override of
+              ``remove_watermark_flag``.
         out_dir: directory the output PNGs are written into (created if needed).
         scale: render multiplier, forwarded to every :func:`generate_card` call.
+        remove_watermark_flag: default corner-watermark removal for every
+            item (see :func:`remove_watermark`); override per item with the
+            ``remove_watermark`` key.
 
     Returns:
         A list of ``(out_path, bg_color_used)``, in the same order as ``items``.
@@ -249,6 +313,7 @@ def generate_cards_batch(
             out_path=out_path,
             scale=scale,
             bg_color=item.get("bg_color"),  # type: ignore[arg-type]
+            remove_watermark_flag=bool(item.get("remove_watermark", remove_watermark_flag)),
         )
         results.append(result)
     return results
@@ -268,7 +333,9 @@ def parse_mapping_file(path: str) -> List[dict]:
       (including extension); it's looked up relative to that directory later.
     - The EN field is optional -- a line with just ``filename | cn text`` is
       fine and leaves the English line blank on the card.
-    - Fields are split on ``|`` and whitespace-trimmed.
+    - Fields are split on ``|`` and whitespace-trimmed. The full-width
+      ``｜`` (U+FF5C) that Chinese IMEs often substitute for ``|`` is
+      normalized to ``|`` first, so either one works as the delimiter.
 
     Returns a list of ``{"image": ..., "cn": ..., "en": ...}`` dicts, in file
     order, where ``image`` is still the bare filename as written (not yet
@@ -277,7 +344,7 @@ def parse_mapping_file(path: str) -> List[dict]:
     items = []
     with open(path, "r", encoding="utf-8") as f:
         for lineno, raw_line in enumerate(f, start=1):
-            line = raw_line.strip()
+            line = raw_line.strip().replace("｜", "|")  # fullwidth "｜" -> ASCII "|"
             if not line or line.startswith("#"):
                 continue
             parts = [p.strip() for p in line.split("|")]
@@ -300,6 +367,7 @@ def generate_cards_from_dir(
     mapping_path: Optional[str] = None,
     out_dir: str = "cards",
     scale: int = 3,
+    remove_watermark_flag: bool = True,
 ) -> List[Tuple[str, Tuple[int, int, int]]]:
     """Batch-generate cards for every row of a mapping file in ``images_dir``.
 
@@ -310,6 +378,9 @@ def generate_cards_from_dir(
             ``<images_dir>/mapping.txt``.
         out_dir: directory the output PNGs are written into (created if needed).
         scale: render multiplier, forwarded to every card.
+        remove_watermark_flag: forwarded to :func:`generate_cards_batch` --
+            inpaint over a corner watermark (see :func:`remove_watermark`)
+            before processing each photo. Default on.
 
     Rows whose image file can't be found are skipped with a printed warning
     instead of aborting the whole batch.
@@ -336,7 +407,7 @@ def generate_cards_from_dir(
             }
         )
 
-    return generate_cards_batch(items, out_dir=out_dir, scale=scale)
+    return generate_cards_batch(items, out_dir=out_dir, scale=scale, remove_watermark_flag=remove_watermark_flag)
 
 
 def _main() -> None:
@@ -348,9 +419,21 @@ def _main() -> None:
     parser.add_argument("--en", default="", help="English subtitle text")
     parser.add_argument("--out", default="card.png", help="Output PNG path")
     parser.add_argument("--scale", type=int, default=3, help="Render scale multiplier (default 3 -> 1179x2556)")
+    parser.add_argument(
+        "--no-remove-watermark",
+        action="store_true",
+        help="Skip corner-watermark inpainting (it's applied by default)",
+    )
     args = parser.parse_args()
 
-    out_path, bg = generate_card(args.image, args.cn, args.en, args.out, scale=args.scale)
+    out_path, bg = generate_card(
+        args.image,
+        args.cn,
+        args.en,
+        args.out,
+        scale=args.scale,
+        remove_watermark_flag=not args.no_remove_watermark,
+    )
     print(f"Wrote {out_path} ({CARD_WIDTH * args.scale}x{CARD_HEIGHT * args.scale}), background={bg}")
 
 
